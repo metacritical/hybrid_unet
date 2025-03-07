@@ -127,7 +127,7 @@ def train(args):
 
         for batch in progress_bar:
             batch = batch.to(device, non_blocking=True)
-            timesteps = torch.randint(0, args.num_timesteps, (batch.size(0),).to(device)
+            timesteps = torch.randint(0, args.num_timesteps, (batch.size(0),)).to(device)
 
             # Forward pass
             clean_embeds = model.module.token_emb(batch) if num_gpus > 1 else model.token_emb(batch)
