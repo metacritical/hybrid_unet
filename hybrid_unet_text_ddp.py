@@ -11,7 +11,7 @@ import os
 class HybridTextDiffusion(nn.Module):
     def __init__(self, vocab_size=50257, num_layers=6, seq_length=256, num_timesteps=1000):
         super().__init__()
-        self.gpt2_config = GPT2Config.from_pretrained('gpt2')
+        self.gpt2_config.activation_function = "gelu_pytorch_tanh"
         self.embed_dim = self.gpt2_config.hidden_size
         self.seq_length = seq_length
 
@@ -20,6 +20,9 @@ class HybridTextDiffusion(nn.Module):
 
         self.gpt2 = GPT2Model.from_pretrained('gpt2')
         self.gpt2_layers = self.gpt2.h[:num_layers]
+
+        for layer in self.gpt2_layers:
+            layer.gradient_checkpointing = True
 
         self.unet = UNet2DModel(
             sample_size=(1, seq_length),
@@ -68,7 +71,7 @@ class TextDataset(Dataset):
                     padding='max_length',
                     truncation=True,
                     return_tensors='pt'
-                ).squeeze()
+                ).squeeze().clone().detach().pin_memory()
                 self.data.append(tokens)
 
     def __len__(self):
@@ -78,6 +81,10 @@ class TextDataset(Dataset):
         return self.data[idx]
 
 def train(args):
+    # Add memory management at start
+    torch.cuda.empty_cache()
+    torch.backends.cuda.cufft_plan_cache.clear()
+
     # Device configuration
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -117,8 +124,17 @@ def train(args):
 
     # Dataset and dataloader
     dataset = TextDataset(args.data_path, tokenizer, args.seq_length)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
-                           num_workers=min(4, os.cpu_count()), pin_memory=True)
+    # dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
+                           # num_workers=min(4, os.cpu_count()), pin_memory=True)
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2 if args.batch_size > 32 else 4
+    )
 
     # Training loop
     for epoch in range(args.epochs):
