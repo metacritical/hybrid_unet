@@ -104,11 +104,12 @@ def train(args):
     ).to(device)
 
     # Multi-GPU setup
+    model.print_params()
+
     if num_gpus > 1:
         print(f"🚀 Utilizing {num_gpus} GPUs with DataParallel")
         model = nn.DataParallel(model)
 
-    model.print_params()
 
     # Optimizer and scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
