@@ -1,0 +1,4 @@
+pip install transformers 
+pip install diffusers
+unzip webtext.train.jsonl.zip
+python hybrid_unet_text_ddp.py --mode train --data_path webtext.train.jsonl --epochs 3 --batch_size 128 --num_layers 6 --seq_length 256 --lr 3e-5  --save_path ./checkpoints
