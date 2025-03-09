@@ -1,2 +1,5 @@
 webtext.train.jsonl.zip filter=lfs diff=lfs merge=lfs -text
 webtext.train.jsonl filter=lfs diff=lfs merge=lfs -text
+train.bin filter=lfs diff=lfs merge=lfs -text
+val.bin filter=lfs diff=lfs merge=lfs -text
+webtext.bin filter=lfs diff=lfs merge=lfs -text

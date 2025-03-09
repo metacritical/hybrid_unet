@@ -8,6 +8,7 @@ import argparse
 from tqdm import tqdm
 import os
 import numpy as np
+from torch.utils.checkpoint import checkpoint
 
 class SelfAttention2D(nn.Module):
     def __init__(self, embed_dim, num_heads=8):
@@ -90,7 +91,7 @@ class CodeUNet(nn.Module):
 
         # Downsample
         for block in self.down_blocks:
-            x = block(x)
+            x = checkpoint(block, x)
             skips.append(x)
 
         # Middle
@@ -99,7 +100,7 @@ class CodeUNet(nn.Module):
         # Upsample with skip connections
         for i, block in enumerate(self.up_blocks):
             x = torch.cat([x, skips.pop()], dim=1)
-            x = block(x)
+            x = checkpoint(block, x)
 
         return self.final(x)
 
@@ -230,6 +231,8 @@ def train(args):
         fused=True  # Enable fused optimizer for speed
     )
 
+    scheduler = DDPMScheduler(num_train_timesteps=args.num_timesteps)
+
     # Mixed precision training
     scaler = torch.cuda.amp.GradScaler()
 
@@ -258,7 +261,7 @@ def train(args):
             )
 
             # Mixed precision context
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 # Get clean embeddings
                 with torch.no_grad():
                     clean_embeddings = model.token_emb(batch)
