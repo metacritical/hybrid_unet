@@ -175,7 +175,7 @@ def train(args):
 
         for batch in progress:
             batch = batch.to(device)
-            timesteps = torch.randint(0, args.num_timesteps, (batch.size(0),).to(device)
+            timesteps = torch.randint(0, args.num_timesteps, (batch.size(0),)).to(device)
 
             # Diffusion process
             clean_emb = model.token_emb(batch)
