@@ -234,7 +234,7 @@ def train(args):
     scheduler = DDPMScheduler(num_train_timesteps=args.num_timesteps)
 
     # Mixed precision training
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler('cuda')
 
     # Dataset and dataloader
     dataset = TextDataset(args.data_path, tokenizer, args.seq_length)
