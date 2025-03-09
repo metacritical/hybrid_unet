@@ -86,7 +86,7 @@ class CodeUNet(nn.Module):
         self.time_embed = nn.Sequential(
             nn.Linear(1, embed_dim//4),
             nn.SiLU(),
-            nn.Linear(embed_dim//4, embed_dim)
+            nn.Linear(embed_dim//4, embed_dim))
 
     def forward(self, x, timesteps):
         # Time embedding
