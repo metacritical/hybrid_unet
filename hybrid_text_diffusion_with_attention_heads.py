@@ -202,12 +202,12 @@ class TextDataset(Dataset):
 def train(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    print("Initializing tokenizer and model...")
 
-    # Fix: Set pad token for GPT-2 tokenizer
+    # Initialize tokenizer with padding token
     tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-    tokenizer.pad_token = tokenizer.eos_token  # Critical fix
+    tokenizer.pad_token = tokenizer.eos_token  # Required for GPT-2
 
+    # Create model with optimized configuration
     model = TextDiffusionModel(
         vocab_size=tokenizer.vocab_size,
         seq_length=args.seq_length,
@@ -216,63 +216,83 @@ def train(args):
         num_down_steps=args.num_down_steps
     ).to(device)
 
-    # Fix: Ensure embedding layer knows about padding
+    # Explicitly set padding index for embedding layer
     model.token_emb.padding_idx = tokenizer.pad_token_id
 
+    # Print parameter count for verification
     model.print_params()
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-    scheduler = DDPMScheduler(num_train_timesteps=args.num_timesteps)
+    # Optimizer with weight decay
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=0.01,
+        fused=True  # Enable fused optimizer for speed
+    )
 
+    # Mixed precision training
+    scaler = torch.cuda.amp.GradScaler()
+
+    # Dataset and dataloader
     dataset = TextDataset(args.data_path, tokenizer, args.seq_length)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        pin_memory=True,  # Optimize memory transfer
+        num_workers=4     # Parallel data loading
+    )
 
-    # Create checkpoint directory if it doesn't exist
-    os.makedirs(args.save_path, exist_ok=True)
-
-    # Training loop with diffusion process
+    # Training loop
     for epoch in range(args.epochs):
         model.train()
         total_loss = 0
         progress_bar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{args.epochs}')
 
         for batch in progress_bar:
-            batch = batch.to(device)
-
-            # Generate random timesteps for diffusion
-            timesteps = torch.randint(0, args.num_timesteps, (batch.size(0),), device=device)
-
-            # Get clean token embeddings
-            with torch.no_grad():
-                clean_embeddings = model.token_emb(batch)
-
-            # Add noise according to the scheduler
-            noise = torch.randn_like(clean_embeddings)
-            noisy_embeddings = scheduler.add_noise(clean_embeddings, noise, timesteps)
-
-            # Pass the noisy embeddings to predict the original tokens
-            logits = model.forward_embeddings(noisy_embeddings, timesteps)
-
-            # Cross entropy loss only on masked (noised) tokens
-            loss = torch.nn.functional.cross_entropy(
-                logits.reshape(-1, logits.size(-1)),
-                batch.reshape(-1),
-                ignore_index=tokenizer.pad_token_id
+            batch = batch.to(device, non_blocking=True)
+            timesteps = torch.randint(
+                0, args.num_timesteps,
+                (batch.size(0),),
+                device=device
             )
 
-            # Optimization step
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # Gradient clipping
-            optimizer.step()
+            # Mixed precision context
+            with torch.cuda.amp.autocast():
+                # Get clean embeddings
+                with torch.no_grad():
+                    clean_embeddings = model.token_emb(batch)
 
+                # Add noise
+                noise = torch.randn_like(clean_embeddings)
+                noisy_embeddings = scheduler.add_noise(clean_embeddings, noise, timesteps)
+
+                # Forward pass
+                logits = model.forward_embeddings(noisy_embeddings, timesteps)
+
+                # Calculate loss
+                loss = torch.nn.functional.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    batch.reshape(-1),
+                    ignore_index=tokenizer.pad_token_id
+                )
+
+            # Backward pass with scaler
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+
+            # Update progress
             total_loss += loss.item()
             progress_bar.set_postfix(loss=loss.item())
 
+        # Epoch completion
         avg_loss = total_loss / len(dataloader)
         print(f'\nEpoch {epoch+1}/{args.epochs} completed. Average Loss: {avg_loss:.4f}')
 
-        # Save model checkpoint
+        # Save checkpoint
         checkpoint_path = f"{args.save_path}/codediffusion_epoch_{epoch+1}.pt"
         torch.save(model.state_dict(), checkpoint_path)
         print(f"Checkpoint saved to {checkpoint_path}")
