@@ -14,10 +14,11 @@ class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=(1,3), padding=(0,1),
+            nn.Conv2d(in_channels, out_channels, kernel_size=(1,3), padding=(0,1)),  # Added comma
             nn.GroupNorm(1, out_channels),
             nn.SiLU(),
-            nn.Conv2d(out_channels, out_channels, kernel_size=(1,3), padding=(0,1)))
+            nn.Conv2d(out_channels, out_channels, kernel_size=(1,3), padding=(0,1))
+        )
         self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=(1,1)) if in_channels != out_channels else nn.Identity()
         self.gamma = nn.Parameter(torch.ones(1))
 
