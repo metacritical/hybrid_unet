@@ -487,7 +487,11 @@ def generate(args):
             
             # For masked tokens, predict and potentially remask some
             if t > 0:  # Not the final step
-                pred_tokens = torch.argmax(probs, dim=-1)
+                temperature = 0.8  # Adjust as needed
+                probs = probs ** (1/temperature)
+                probs = probs / probs.sum(dim=-1, keepdim=True)
+                pred_tokens = torch.multinomial(probs.view(-1, probs.size(-1)), 1).view(probs.size(0), -1)
+
                 
                 # Create a new mask for the next step, using either:
                 # 1. Low confidence remasking strategy (from LLaDA paper)
