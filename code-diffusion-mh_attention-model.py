@@ -285,7 +285,7 @@ class TextDiffusionModel(nn.Module):
         x = embeddings + t_emb
         
         # RoBERTa processing
-        for layer in self.code_layers:
+        for layer in self.text_layers:
             x = layer(x)[0]
         
         # UNet requires [batch, channels, height, width]
