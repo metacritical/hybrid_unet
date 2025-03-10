@@ -447,7 +447,7 @@ def main():
     print(f"Using device: {device}")
     
     # Set up tokenizer
-    checkpoint_vocab_size = get_vocab_size_from_checkpoint(args.model_path, device)
+    vocab_size = get_vocab_size_from_checkpoint(args.model_path, device)
     print(f"Detected vocabulary size from checkpoint: {checkpoint_vocab_size}")
 
     tokenizer, _, mask_token_id = setup_tokenizer(args)
