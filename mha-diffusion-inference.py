@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import argparse
 import os
 import time
-from transformers import GPT2Tokenizer
+from transformers import GPT2Tokenizer, BertTokenizer
 import tiktoken
 import colorama
 from colorama import Fore, Back, Style
@@ -12,8 +12,7 @@ import re
 import sys
 
 # Import the model architecture from your implementation
-# This assumes your model is in code-diffusion-mh_attention-model.py
-# Modify this to match your actual module name and class
+# Make sure the filename matches your actual module name
 from code_diffusion_mh_attention_model import TextDiffusionModel, DiffusionUNet, TransformerBlock, MultiHeadAttention
 
 # Initialize colorama
@@ -33,8 +32,8 @@ def parse_args():
                         help="Number of diffusion timesteps")
     
     # Tokenizer options
-    parser.add_argument("--tokenizer_type", type=str, default="gpt2",
-                        choices=["gpt2", "tiktoken"],
+    parser.add_argument("--tokenizer_type", type=str, default="bert",
+                        choices=["bert", "gpt2", "tiktoken"],
                         help="Type of tokenizer to use")
     parser.add_argument("--tiktoken_encoding", type=str, default="cl100k_base",
                         help="Tiktoken encoding to use (cl100k_base for GPT-4, p50k_base for GPT-3)")
@@ -76,9 +75,16 @@ def setup_tokenizer(args):
         class TiktokenWrapper:
             def __init__(self, encoding):
                 self.encoding = encoding
+                self.mask_token_id = 0  # Use a reserved token
+                self.vocab_size = vocab_size
             
-            def encode(self, text, return_tensors=None):
+            def encode(self, text, return_tensors=None, max_length=None, padding=None, truncation=None):
                 tokens = self.encoding.encode(text)
+                if max_length is not None:
+                    if truncation:
+                        tokens = tokens[:max_length]
+                    if padding:
+                        tokens = tokens + [0] * (max_length - len(tokens))
                 if return_tensors == 'pt':
                     return torch.tensor([tokens])
                 return tokens
@@ -90,6 +96,11 @@ def setup_tokenizer(args):
         
         tokenizer = TiktokenWrapper(encoding)
         mask_token_id = 0  # Typically a reserved token in tiktoken
+    elif args.tokenizer_type == 'bert':
+        # Use BERT tokenizer to match the original model architecture
+        tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        vocab_size = tokenizer.vocab_size
+        mask_token_id = tokenizer.mask_token_id
     else:  # Default to GPT2
         tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
         tokenizer.pad_token = tokenizer.eos_token
@@ -113,6 +124,11 @@ def low_confidence_remasking(probs, num_to_remask):
         indices of tokens to remask
     """
     confidences, _ = torch.max(probs, dim=-1)
+    # Make sure we don't try to get more tokens than available
+    num_to_remask = min(num_to_remask, confidences.numel())
+    if num_to_remask <= 0:
+        return torch.tensor([], device=probs.device, dtype=torch.long)
+    
     _, indices = torch.topk(confidences, k=num_to_remask, largest=False)
     return indices
 
@@ -214,14 +230,15 @@ def temperature_sampling(logits, temperature=1.0, top_k=0, top_p=1.0):
     # Sample from the distribution
     return torch.multinomial(probs, 1).squeeze(-1)
 
+
 def get_vocab_size_from_checkpoint(checkpoint_path, device):
     """Extract vocabulary size from a model checkpoint."""
     state_dict = torch.load(checkpoint_path, map_location=device)
     if 'token_emb.weight' in state_dict:
         return state_dict['token_emb.weight'].size(0)
     else:
-        # Default to GPT2 vocab size if not found
-        return 50257
+        # Default to BERT vocab size if not found
+        return 30522
 
 
 def generate_text(model, tokenizer, mask_token_id, prompt=None, gen_length=256, 
@@ -254,8 +271,16 @@ def generate_text(model, tokenizer, mask_token_id, prompt=None, gen_length=256,
     
     # Process prompt if provided
     if prompt:
-        prompt_tokens = tokenizer.encode(prompt, return_tensors='pt').to(device)
+        prompt_tokens = tokenizer.encode(
+            prompt, 
+            return_tensors='pt',
+            max_length=gen_length,
+            padding='max_length',
+            truncation=True
+        ).to(device)
         prompt_len = prompt_tokens.size(1)
+        # Clip prompt length to prevent exceed gen_length
+        prompt_len = min(prompt_len, gen_length)
     else:
         prompt_tokens = None
         prompt_len = 0
@@ -265,7 +290,7 @@ def generate_text(model, tokenizer, mask_token_id, prompt=None, gen_length=256,
     
     # Copy prompt to the beginning if provided
     if prompt_tokens is not None:
-        x[0, :prompt_len] = prompt_tokens[0]
+        x[0, :prompt_len] = prompt_tokens[0, :prompt_len]
     
     # Define time steps for sampling
     # Convert from [0, 1, 2, ..., num_timesteps-1] to [1.0, 0.9, 0.8, ..., 0.0]
@@ -295,8 +320,9 @@ def generate_text(model, tokenizer, mask_token_id, prompt=None, gen_length=256,
             # Current denoising step
             timesteps = torch.tensor([current_t], device=device)
             
-            # Get model predictions
-            logits = model(x, timesteps)
+            # Forward through the model
+            # We'll use forward_tokens to directly handle token indices
+            logits = model.forward_tokens(x, timesteps)
             
             # Identify which tokens are currently masked
             is_masked = (x == mask_token_id).squeeze(0)
@@ -304,81 +330,86 @@ def generate_text(model, tokenizer, mask_token_id, prompt=None, gen_length=256,
             if is_masked.any():
                 # For masked tokens, sample new tokens with temperature, top-k, and top-p
                 masked_logits = logits[:, is_masked, :]
-                sampled_tokens = temperature_sampling(
-                    masked_logits.view(-1, logits.size(-1)), 
-                    temperature=temperature,
-                    top_k=top_k,
-                    top_p=top_p
-                )
                 
-                # Create new sequence with sampled tokens
-                new_x = x.clone()
-                new_x[0, is_masked] = sampled_tokens
-                
-                # For visualization: get indices of newly unmasked tokens
-                newly_unmasked_indices = set()
-                for idx in range(gen_length):
-                    if idx in current_masked_positions and new_x[0, idx] != mask_token_id:
-                        newly_unmasked_indices.add(idx)
-                
-                # For the next step, determine how many tokens should remain masked
-                if next_t > 0:
-                    current_mask_ratio = float(current_t) / num_timesteps
-                    next_mask_ratio = float(next_t) / num_timesteps
+                # Verify that masked_logits has valid shapes
+                if masked_logits.size(1) > 0:
+                    sampled_tokens = temperature_sampling(
+                        masked_logits.view(-1, logits.size(-1)), 
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p
+                    )
                     
-                    # Get number of tokens that should be remasked
-                    unmasked_indices = torch.where(is_masked)[0]
-                    tokens_to_unmask = len(unmasked_indices)
-                    tokens_to_remask = int(tokens_to_unmask * next_mask_ratio / current_mask_ratio)
+                    # Create new sequence with sampled tokens
+                    new_x = x.clone()
+                    new_x[0, is_masked] = sampled_tokens
                     
-                    if tokens_to_remask > 0 and len(unmasked_indices) > 0:
-                        # Get probabilities for tokens that were just unmasked
-                        probs = F.softmax(masked_logits.squeeze(0), dim=-1)
+                    # For visualization: get indices of newly unmasked tokens
+                    newly_unmasked_indices = set()
+                    for idx in range(gen_length):
+                        if idx in current_masked_positions and new_x[0, idx] != mask_token_id:
+                            newly_unmasked_indices.add(idx)
+                    
+                    # For the next step, determine how many tokens should remain masked
+                    if next_t > 0:
+                        current_mask_ratio = float(current_t) / num_timesteps
+                        next_mask_ratio = float(next_t) / num_timesteps
                         
-                        # Get the predicted token probabilities
-                        token_probs = torch.gather(
-                            probs, 1, 
-                            sampled_tokens.unsqueeze(-1)
-                        ).squeeze(-1)
-                        
-                        # Get low confidence tokens to remask
-                        remask_local_indices = low_confidence_remasking(
-                            token_probs.unsqueeze(0), tokens_to_remask
-                        )
-                        
-                        # Convert local indices to global indices
-                        if len(remask_local_indices) > 0:
-                            remask_global_indices = unmasked_indices[remask_local_indices]
+                        # Get indices of tokens that were just unmasked
+                        unmasked_indices = torch.where(~is_masked)[0]
+                        if len(unmasked_indices) > 0:
+                            # Calculate how many tokens to remask
+                            tokens_to_unmask = len(unmasked_indices)
+                            tokens_to_remask = int(tokens_to_unmask * next_mask_ratio / current_mask_ratio)
                             
-                            # Apply remasking
-                            new_x[0, remask_global_indices] = mask_token_id
-                
-                x = new_x
-                
-                # Update masked positions for visualization
-                current_masked_positions = set(idx.item() for idx in torch.where(x[0] == mask_token_id)[0])
-                
-                # Update set of previously unmasked tokens
-                if highlight_new:
-                    newly_highlighted = newly_unmasked_indices - previously_unmasked
-                    previously_unmasked.update(newly_unmasked_indices)
-                else:
-                    newly_highlighted = None
-                
-                # Keep prompt fixed if provided
-                if prompt_tokens is not None:
-                    x[0, :prompt_len] = prompt_tokens[0]
-                
-                # Visualize the current state
-                current_text = tokenizer.decode(x[0], skip_special_tokens=True)
-                
-                # Pad the text if needed
-                if len(current_text) < gen_length:
-                    current_text = current_text + " " * (gen_length - len(current_text))
-                
-                # Visualize
-                visualize_generation(current_text, current_masked_positions, newly_highlighted, mask_symbol)
-                time.sleep(delay)
+                            if tokens_to_remask > 0:
+                                # Get probabilities for all tokens
+                                probs = F.softmax(logits.squeeze(0), dim=-1)
+                                
+                                # Get the probabilities of the selected tokens
+                                token_probs = torch.gather(
+                                    probs[unmasked_indices], 1, 
+                                    new_x[0, unmasked_indices].unsqueeze(-1)
+                                ).squeeze(-1)
+                                
+                                # Get low confidence tokens to remask
+                                remask_local_indices = low_confidence_remasking(
+                                    token_probs.unsqueeze(0), tokens_to_remask
+                                )
+                                
+                                # Convert local indices to global indices if we have any to remask
+                                if remask_local_indices.numel() > 0:
+                                    remask_global_indices = unmasked_indices[remask_local_indices]
+                                    
+                                    # Apply remasking
+                                    new_x[0, remask_global_indices] = mask_token_id
+                    
+                    x = new_x
+                    
+                    # Update masked positions for visualization
+                    current_masked_positions = set(idx.item() for idx in torch.where(x[0] == mask_token_id)[0])
+                    
+                    # Update set of previously unmasked tokens
+                    if highlight_new:
+                        newly_highlighted = newly_unmasked_indices - previously_unmasked
+                        previously_unmasked.update(newly_unmasked_indices)
+                    else:
+                        newly_highlighted = None
+                    
+                    # Keep prompt fixed if provided
+                    if prompt_tokens is not None:
+                        x[0, :prompt_len] = prompt_tokens[0, :prompt_len]
+                    
+                    # Visualize the current state
+                    current_text = tokenizer.decode(x[0], skip_special_tokens=True)
+                    
+                    # Pad the text if needed
+                    if len(current_text) < gen_length:
+                        current_text = current_text + " " * (gen_length - len(current_text))
+                    
+                    # Visualize
+                    visualize_generation(current_text, current_masked_positions, newly_highlighted, mask_symbol)
+                    time.sleep(delay)
     
     # Final decoded text
     final_text = tokenizer.decode(x[0], skip_special_tokens=True)
@@ -446,12 +477,15 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Set up tokenizer
+    # Get vocabulary size from checkpoint
     checkpoint_vocab_size = get_vocab_size_from_checkpoint(args.model_path, device)
-
+    print(f"Detected vocabulary size from checkpoint: {checkpoint_vocab_size}")
+    
+    # Set up tokenizer - ensure we use the BERT tokenizer by default
+    # since the model was trained with BERT tokenizer
     tokenizer, _, mask_token_id = setup_tokenizer(args)
     
-    # Initialize model
+    # Initialize model with the correct vocabulary size
     print(f"Loading model from {args.model_path}")
     model = TextDiffusionModel(
         vocab_size=checkpoint_vocab_size,
@@ -461,12 +495,14 @@ def main():
     ).to(device)
     
     # Load model with safety settings
-    model.load_state_dict(torch.load(args.model_path, map_location=device, weights_only=True))
-    model.eval()
+    try:
+        model.load_state_dict(torch.load(args.model_path, map_location=device))
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        print("Trying to load with weights_only=True...")
+        model.load_state_dict(torch.load(args.model_path, map_location=device, weights_only=True))
     
-    # Print model summary
-    print(f"Detected vocabulary size from checkpoint: {checkpoint_vocab_size}")
-
+    model.eval()
     
     # Start interactive session
     interactive_session(model, tokenizer, mask_token_id, args, device)
