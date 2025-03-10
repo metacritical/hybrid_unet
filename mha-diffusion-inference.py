@@ -447,8 +447,7 @@ def main():
     print(f"Using device: {device}")
     
     # Set up tokenizer
-    vocab_size = get_vocab_size_from_checkpoint(args.model_path, device)
-    print(f"Detected vocabulary size from checkpoint: {checkpoint_vocab_size}")
+    checkpoint_vocab_size = get_vocab_size_from_checkpoint(args.model_path, device)
 
     tokenizer, _, mask_token_id = setup_tokenizer(args)
     
@@ -466,7 +465,8 @@ def main():
     model.eval()
     
     # Print model summary
-    print(f"Loaded model with vocabulary size: {vocab_size}")
+    print(f"Detected vocabulary size from checkpoint: {checkpoint_vocab_size}")
+
     
     # Start interactive session
     interactive_session(model, tokenizer, mask_token_id, args, device)
