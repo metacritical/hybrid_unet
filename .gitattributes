@@ -3,3 +3,5 @@ webtext.train.jsonl filter=lfs diff=lfs merge=lfs -text
 train.bin filter=lfs diff=lfs merge=lfs -text
 val.bin filter=lfs diff=lfs merge=lfs -text
 webtext.bin filter=lfs diff=lfs merge=lfs -text
+wiki_simple.zip filter=lfs diff=lfs merge=lfs -text
+train-00000-of-00041.json filter=lfs diff=lfs merge=lfs -text
