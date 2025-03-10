@@ -214,6 +214,15 @@ def temperature_sampling(logits, temperature=1.0, top_k=0, top_p=1.0):
     # Sample from the distribution
     return torch.multinomial(probs, 1).squeeze(-1)
 
+def get_vocab_size_from_checkpoint(checkpoint_path, device):
+    """Extract vocabulary size from a model checkpoint."""
+    state_dict = torch.load(checkpoint_path, map_location=device)
+    if 'token_emb.weight' in state_dict:
+        return state_dict['token_emb.weight'].size(0)
+    else:
+        # Default to GPT2 vocab size if not found
+        return 50257
+
 
 def generate_text(model, tokenizer, mask_token_id, prompt=None, gen_length=256, 
                   sampling_steps=50, temperature=0.8, top_k=50, top_p=0.95,
@@ -438,12 +447,15 @@ def main():
     print(f"Using device: {device}")
     
     # Set up tokenizer
-    tokenizer, vocab_size, mask_token_id = setup_tokenizer(args)
+    checkpoint_vocab_size = get_vocab_size_from_checkpoint(args.model_path, device)
+    print(f"Detected vocabulary size from checkpoint: {checkpoint_vocab_size}")
+
+    tokenizer, _, mask_token_id = setup_tokenizer(args)
     
     # Initialize model
     print(f"Loading model from {args.model_path}")
     model = TextDiffusionModel(
-        vocab_size=vocab_size,
+        vocab_size=checkpoint_vocab_size,
         num_layers=args.num_layers,
         seq_length=args.seq_length,
         num_timesteps=args.num_timesteps
